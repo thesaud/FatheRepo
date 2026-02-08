@@ -8,96 +8,68 @@ on:
 jobs:
   deploy:
     runs-on: self-hosted
-
     env:
       SITE_NAME: TeaResh
-      APP_POOL: TeaReshPool
+      APP_POOL: TeaResh-AppPool
       SITE_PORT: 8080
-      DEPLOY_PATH: C:\inetpub\wwwroot\TeaResh
-      PUBLISH_PATH: ${{ github.workspace }}\publish
-      ZIP_PATH: ${{ github.workspace }}\publish.zip
+      TARGET_PATH: C:\inetpub\wwwroot\TeaResh
+      ZIP_PATH: C:\inetpub\wwwroot\TeaResh.zip
 
     steps:
-    # ===============================
-    # Checkout
-    # ===============================
-    - name: Checkout code
-      uses: actions/checkout@v4
+      - name: Checkout repo
+        uses: actions/checkout@v3
 
-    # ===============================
-    # Restore
-    # ===============================
-    - name: Restore
-      run: dotnet restore TeaResh/TeaResh.csproj
+      - name: Setup .NET
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 8.0.x
 
-    # ===============================
-    # Build
-    # ===============================
-    - name: Build
-      run: dotnet build TeaResh/TeaResh.csproj -c Release --no-restore
+      - name: Restore dependencies
+        run: dotnet restore TeaResh.slnx
 
-    # ===============================
-    # Publish
-    # ===============================
-    - name: Publish
-      run: dotnet publish TeaResh/TeaResh.csproj -c Release -o $env:PUBLISH_PATH --no-build
+      - name: Build project
+        run: dotnet build TeaResh.slnx --configuration Release
 
-    # ===============================
-    # Zip publish
-    # ===============================
-    - name: Zip publish output
-      run: |
-        if (Test-Path $env:ZIP_PATH) { Remove-Item $env:ZIP_PATH -Force }
-        Compress-Archive -Path "$env:PUBLISH_PATH\*" -DestinationPath $env:ZIP_PATH
+      - name: Publish project
+        run: dotnet publish TeaResh.slnx --configuration Release --output ${{ env.TARGET_PATH }}\publish
 
-    # ===============================
-    # Setup IIS (AppPool + Site)
-    # ===============================
-    - name: Setup IIS
-      shell: powershell
-      run: |
-        Import-Module WebAdministration
+      - name: Zip published files
+        run: |
+          if (Test-Path ${{ env.ZIP_PATH }}) { Remove-Item ${{ env.ZIP_PATH }} -Force }
+          Compress-Archive -Path "${{ env.TARGET_PATH }}\publish\*" -DestinationPath ${{ env.ZIP_PATH }} -Force
 
-        if (-not (Test-Path "IIS:\AppPools\$env:APP_POOL")) {
-          New-WebAppPool -Name $env:APP_POOL
-          Set-ItemProperty "IIS:\AppPools\$env:APP_POOL" -Name managedRuntimeVersion -Value ""
-        }
+      - name: Deploy to IIS using appcmd
+        run: |
+          # Extract zip to target folder
+          if (Test-Path ${{ env.TARGET_PATH }}) {
+            Remove-Item "${{ env.TARGET_PATH }}\*" -Recurse -Force
+          } else {
+            New-Item -Path ${{ env.TARGET_PATH }} -ItemType Directory | Out-Null
+          }
 
-        if (-not (Test-Path "IIS:\Sites\$env:SITE_NAME")) {
-          New-Item -Path $env:DEPLOY_PATH -ItemType Directory -Force
-          New-Website `
-            -Name $env:SITE_NAME `
-            -Port $env:SITE_PORT `
-            -PhysicalPath $env:DEPLOY_PATH `
-            -ApplicationPool $env:APP_POOL
-        }
+          Expand-Archive -Path ${{ env.ZIP_PATH }} -DestinationPath ${{ env.TARGET_PATH }} -Force
 
-    # ===============================
-    # Stop site (file lock safe)
-    # ===============================
-    - name: Stop IIS Site
-      run: appcmd stop site /site.name:${{ env.SITE_NAME }}
+          # Flatten if single inner folder
+          $innerDirs = Get-ChildItem ${{ env.TARGET_PATH }} -Directory
+          if ($innerDirs.Count -eq 1) {
+            Move-Item "$($innerDirs[0].FullName)\*" ${{ env.TARGET_PATH }} -Force
+            Remove-Item $innerDirs[0].FullName -Recurse -Force
+          }
 
-    # ===============================
-    # Clean deploy folder
-    # ===============================
-    - name: Clean deploy folder
-      shell: powershell
-      run: |
-        if (Test-Path $env:DEPLOY_PATH) {
-          Get-ChildItem $env:DEPLOY_PATH -Recurse -Force | Remove-Item -Recurse -Force
-        }
+          # Create App Pool if not exists
+          $appPoolExists = & $env:windir\system32\inetsrv\appcmd list apppool ${{ env.APP_POOL }} 2>$null
+          if (-not $appPoolExists) {
+            & $env:windir\system32\inetsrv\appcmd add apppool /name:${{ env.APP_POOL }} /managedPipelineMode:Integrated /managedRuntimeVersion:
+          }
 
-    # ===============================
-    # Extract zip to IIS
-    # ===============================
-    - name: Extract to IIS
-      shell: powershell
-      run: |
-        Expand-Archive -Path $env:ZIP_PATH -DestinationPath $env:DEPLOY_PATH -Force
+          # Create Site if not exists
+          $siteExists = & $env:windir\system32\inetsrv\appcmd list site ${{ env.SITE_NAME }} 2>$null
+          if (-not $siteExists) {
+            & $env:windir\system32\inetsrv\appcmd add site /name:${{ env.SITE_NAME }} /physicalPath:${{ env.TARGET_PATH }} /bindings:http/*:${{ env.SITE_PORT }}:
+            & $env:windir\system32\inetsrv\appcmd set site ${{ env.SITE_NAME }} /applicationDefaults.applicationPool:${{ env.APP_POOL }}
+          }
 
-    # ===============================
-    # Start site
-    # ===============================
-    - name: Start IIS Site
-      run: appcmd start site /site.name:${{ env.SITE_NAME }}
+          # Start App Pool
+          & $env:windir\system32\inetsrv\appcmd start apppool /apppool.name:${{ env.APP_POOL }} | Out-Null
+
+          Write-Host "Deployment completed successfully!"

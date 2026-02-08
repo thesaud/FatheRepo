@@ -8,6 +8,7 @@ on:
 jobs:
   deploy:
     runs-on: self-hosted
+
     env:
       SITE_NAME: TeaResh
       APP_POOL: TeaResh-AppPool
@@ -16,7 +17,7 @@ jobs:
       ZIP_PATH: C:\inetpub\wwwroot\TeaResh.zip
 
     steps:
-      - name: Checkout repo
+      - name: Checkout repository
         uses: actions/checkout@v3
 
       - name: Setup .NET
@@ -25,13 +26,13 @@ jobs:
           dotnet-version: 8.0.x
 
       - name: Restore dependencies
-        run: dotnet restore TeaResh.slnx
+        run: dotnet restore TeaResh\TeaResh.csproj
 
       - name: Build project
-        run: dotnet build TeaResh.slnx --configuration Release
+        run: dotnet build TeaResh\TeaResh.csproj --configuration Release
 
       - name: Publish project
-        run: dotnet publish TeaResh.slnx --configuration Release --output ${{ env.TARGET_PATH }}\publish
+        run: dotnet publish TeaResh\TeaResh.csproj --configuration Release --output ${{ env.TARGET_PATH }}\publish
 
       - name: Zip published files
         run: |
@@ -40,13 +41,20 @@ jobs:
 
       - name: Deploy to IIS using appcmd
         run: |
-          # Extract zip to target folder
+          # Stop App Pool if exists
+          $appPoolExists = & $env:windir\system32\inetsrv\appcmd list apppool ${{ env.APP_POOL }} 2>$null
+          if ($appPoolExists) {
+            & $env:windir\system32\inetsrv\appcmd stop apppool /apppool.name:${{ env.APP_POOL }} | Out-Null
+          }
+
+          # Clear target folder
           if (Test-Path ${{ env.TARGET_PATH }}) {
             Remove-Item "${{ env.TARGET_PATH }}\*" -Recurse -Force
           } else {
             New-Item -Path ${{ env.TARGET_PATH }} -ItemType Directory | Out-Null
           }
 
+          # Extract zip to target folder
           Expand-Archive -Path ${{ env.ZIP_PATH }} -DestinationPath ${{ env.TARGET_PATH }} -Force
 
           # Flatten if single inner folder
@@ -57,7 +65,6 @@ jobs:
           }
 
           # Create App Pool if not exists
-          $appPoolExists = & $env:windir\system32\inetsrv\appcmd list apppool ${{ env.APP_POOL }} 2>$null
           if (-not $appPoolExists) {
             & $env:windir\system32\inetsrv\appcmd add apppool /name:${{ env.APP_POOL }} /managedPipelineMode:Integrated /managedRuntimeVersion:
           }
@@ -72,4 +79,4 @@ jobs:
           # Start App Pool
           & $env:windir\system32\inetsrv\appcmd start apppool /apppool.name:${{ env.APP_POOL }} | Out-Null
 
-          Write-Host "Deployment completed successfully!"
+          Write-Host "✅ Deployment completed successfully!"
